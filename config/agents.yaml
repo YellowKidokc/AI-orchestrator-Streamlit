@@ -1,0 +1,46 @@
+agents:
+  - id: admin
+    display_name: Admin Orchestrator
+    provider: internal
+    role: admin
+    privileges:
+      - compose
+      - read_docs
+    description: Facilitates rounds, enforces structure, and summarises outcomes.
+    enabled_by_default: true
+    cost_per_1k_tokens: 0.00
+  - id: gpt_researcher
+    display_name: GPT Researcher
+    provider: openai
+    model: gpt-4o-mini
+    role: participant
+    privileges:
+      - compose
+      - read_docs
+      - web
+    description: Generates exploratory research notes and proposes next steps.
+    enabled_by_default: true
+    cost_per_1k_tokens: 0.60
+  - id: claude_reviewer
+    display_name: Claude Reviewer
+    provider: anthropic
+    model: claude-3-5-sonnet
+    role: participant
+    privileges:
+      - compose
+      - read_docs
+    description: Reviews peer responses for clarity and alignment with the goal.
+    enabled_by_default: true
+    cost_per_1k_tokens: 0.80
+  - id: gemini_synthesiser
+    display_name: Gemini Synthesiser
+    provider: google
+    model: gemini-1.5-pro
+    role: participant
+    privileges:
+      - compose
+      - read_docs
+      - code
+    description: Synthesises insights into structured plans and implementation checklists.
+    enabled_by_default: false
+    cost_per_1k_tokens: 0.45
