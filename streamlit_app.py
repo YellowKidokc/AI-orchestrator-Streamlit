@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 
 import streamlit as st
 import yaml
@@ -15,6 +17,7 @@ from scripts.orchestrator_adapter import AgentTurn, dry_run_compose
 CONFIG_PATH = Path("config/agents.yaml")
 UPLOADS_DIR = Path("uploads")
 TRANSCRIPT_LOG_PATH = Path("data/session_transcript.jsonl")
+CONVERSATIONS_DIR = Path("data/conversations")
 DEFAULT_ROUND_STRUCTURE = (
     ("kickoff", "admin"),
     ("task", "all"),
@@ -33,7 +36,12 @@ class SessionSettings:
 
 
 def load_agent_configs() -> List[Dict[str, object]]:
-    """Return the list of configured agents from the YAML file."""
+    """Return the list of configured agents from the YAML file.
+
+    Any credential references are resolved from Streamlit secrets or
+    environment variables so that API keys are not hard-coded in the
+    repository.
+    """
 
     if not CONFIG_PATH.exists():
         st.error(
@@ -49,26 +57,74 @@ def load_agent_configs() -> List[Dict[str, object]]:
         st.error("Invalid agents configuration; expected a list of agents under 'agents'.")
         return []
 
-    return agents
+    resolved: List[Dict[str, object]] = []
+    for agent in agents:
+        resolved.append({**agent, **_resolve_agent_credentials(agent)})
+
+    return resolved
+
+
+def _resolve_agent_credentials(agent: Dict[str, object]) -> Dict[str, object]:
+    """Return credential metadata for an agent without exposing secrets."""
+
+    # Agents can specify either a Streamlit secret key (preferred) or an
+    # environment variable name from which to pull credentials.
+    secret_key = str(agent.get("secret_key", "")) or None
+    env_key = str(agent.get("env_key", "")) or None
+
+    credential = None
+    if secret_key:
+        if secret_key in st.secrets:
+            credential = st.secrets[secret_key]
+        else:
+            st.warning(
+                f"Secret '{secret_key}' for agent {agent.get('id', 'unknown')} is not defined in st.secrets."
+            )
+    if credential is None and env_key:
+        credential = os.getenv(env_key)
+        if credential is None:
+            st.warning(
+                f"Environment variable '{env_key}' for agent {agent.get('id', 'unknown')} is not set."
+            )
+
+    if credential:
+        # We never display the credential value, but we expose a flag so the
+        # UI can confirm whether credentials are configured.
+        return {"has_credentials": True}
+
+    return {"has_credentials": False}
 
 
 def ensure_runtime_directories() -> None:
     """Ensure directories required for uploads and transcript logs exist."""
 
-    for directory in (UPLOADS_DIR, TRANSCRIPT_LOG_PATH.parent):
+    for directory in (UPLOADS_DIR, TRANSCRIPT_LOG_PATH.parent, CONVERSATIONS_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
 
-def append_turn(turn: AgentTurn) -> None:
-    """Persist a turn to session state and append it to the JSONL transcript log."""
+def append_turn(turn: AgentTurn, target_agent_id: str | None = None) -> None:
+    """Persist a turn and update derived transcript state."""
 
-    st.session_state.transcript.append(asdict(turn))
+    record = asdict(turn)
+    if target_agent_id:
+        record["target_agent_id"] = target_agent_id
+
+    st.session_state.transcript.append(record)
     log_record = {
         "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
-        **asdict(turn),
+        **record,
     }
     with TRANSCRIPT_LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(log_record) + "\n")
+
+    if "agent_conversations" not in st.session_state:
+        st.session_state.agent_conversations = {}
+
+    st.session_state.agent_conversations.setdefault(turn.agent_id, []).append(record)
+    if target_agent_id:
+        st.session_state.agent_conversations.setdefault(target_agent_id, []).append(record)
+    if turn.agent_id == "user":
+        st.session_state.agent_conversations.setdefault("user", []).append(record)
 
 
 def initialise_state(agents: Iterable[Dict[str, object]]) -> None:
@@ -76,6 +132,9 @@ def initialise_state(agents: Iterable[Dict[str, object]]) -> None:
 
     if "transcript" not in st.session_state:
         st.session_state.transcript = []
+    if "agent_conversations" not in st.session_state:
+        st.session_state.agent_conversations = {agent["id"]: [] for agent in agents}
+        st.session_state.agent_conversations.setdefault("user", [])
     if "completed_rounds" not in st.session_state:
         st.session_state.completed_rounds = 0
     if "agent_enabled" not in st.session_state:
@@ -90,12 +149,16 @@ def initialise_state(agents: Iterable[Dict[str, object]]) -> None:
             max_rounds=3,
             may_skip_redundant=True,
         )
+    if "active_agent_id" not in st.session_state and agents:
+        st.session_state.active_agent_id = agents[0]["id"]
 
 
 def reset_session(agents: Iterable[Dict[str, object]]) -> None:
     """Clear transcript and reset counters while preserving agent toggles."""
 
     st.session_state.transcript = []
+    st.session_state.agent_conversations = {agent["id"]: [] for agent in agents}
+    st.session_state.agent_conversations.setdefault("user", [])
     st.session_state.completed_rounds = 0
     st.session_state.session_settings = SessionSettings(
         goal="Explore the problem space",
@@ -170,11 +233,13 @@ def render_transcript(transcript: List[Dict[str, object]]) -> None:
         st.markdown(header)
         st.write(turn.get("content", ""))
         metrics = f"Tokens: {turn.get('tokens', 0)} · Cost: ${turn.get('cost_estimate', 0.0):.4f}"
+        if target := turn.get("target_agent_id"):
+            metrics += f" · → {target}"
         st.caption(metrics)
         st.divider()
 
 
-def handle_manual_message(text: str) -> None:
+def handle_manual_message(text: str, target_agent_id: str | None = None) -> None:
     """Append a manual facilitator message to the transcript."""
 
     content = text.strip()
@@ -189,7 +254,75 @@ def handle_manual_message(text: str) -> None:
         tokens=len(content.split()),
         cost_estimate=0.0,
     )
-    append_turn(manual_turn)
+    append_turn(manual_turn, target_agent_id=target_agent_id)
+
+
+def rebuild_agent_conversations(transcript: List[Dict[str, object]]) -> Dict[str, List[Dict[str, object]]]:
+    """Return a mapping of agent ids to their specific conversation turns."""
+
+    conversations: Dict[str, List[Dict[str, object]]] = {}
+    for turn in transcript:
+        agent_id = str(turn.get("agent_id", ""))
+        conversations.setdefault(agent_id, []).append(turn)
+        if target := turn.get("target_agent_id"):
+            conversations.setdefault(str(target), []).append(turn)
+        if agent_id == "user":
+            conversations.setdefault("user", []).append(turn)
+    return conversations
+
+
+def _slugify(value: str) -> str:
+    """Return a filesystem-friendly slug for conversation titles."""
+
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-") or "session"
+
+
+def save_conversation(
+    transcript: List[Dict[str, object]], title: str, completed_rounds: int = 0
+) -> Tuple[Path, Path]:
+    """Persist the transcript as both JSON and Markdown for later retrieval."""
+
+    if not transcript:
+        raise ValueError("Cannot save an empty transcript.")
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    slug = _slugify(title)
+    base_name = f"{timestamp}_{slug}"
+
+    json_path = CONVERSATIONS_DIR / f"{base_name}.json"
+    markdown_path = CONVERSATIONS_DIR / f"{base_name}.md"
+
+    payload = {
+        "title": title,
+        "saved_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "completed_rounds": completed_rounds,
+        "transcript": transcript,
+    }
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    markdown_lines = [f"# {title}", ""]
+    for turn in transcript:
+        speaker = turn.get("display_name") or turn.get("agent_id", "agent")
+        phase = turn.get("phase", "")
+        header = f"## {speaker}"
+        if phase:
+            header += f" · {phase}"
+        markdown_lines.append(header)
+        markdown_lines.append("")
+        markdown_lines.append(turn.get("content", ""))
+        markdown_lines.append("")
+    markdown_path.write_text("\n".join(markdown_lines).strip() + "\n", encoding="utf-8")
+
+    return json_path, markdown_path
+
+
+def load_saved_conversation(path: Path) -> Dict[str, object]:
+    """Load a saved conversation payload from disk."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def handle_uploads(uploaded_files: List["UploadedFile"]) -> None:
@@ -223,7 +356,32 @@ def main() -> None:
     agents = load_agent_configs()
     initialise_state(agents)
 
+    rebuilt_conversations = rebuild_agent_conversations(st.session_state.transcript)
+    for agent in agents:
+        rebuilt_conversations.setdefault(agent["id"], [])
+    rebuilt_conversations.setdefault("user", rebuilt_conversations.get("user", []))
+    st.session_state.agent_conversations = rebuilt_conversations
+
+    if agents and (
+        "active_agent_id" not in st.session_state
+        or st.session_state.active_agent_id not in {agent["id"] for agent in agents}
+    ):
+        st.session_state.active_agent_id = agents[0]["id"]
+
     st.sidebar.title("Session Controls")
+    if agents:
+        agent_ids = [agent["id"] for agent in agents]
+        selected_agent = st.sidebar.selectbox(
+            "Active agent persona",
+            options=agent_ids,
+            index=agent_ids.index(st.session_state.active_agent_id),
+            format_func=lambda agent_id: next(
+                (agent.get("display_name", agent_id) for agent in agents if agent["id"] == agent_id),
+                agent_id,
+            ),
+        )
+        st.session_state.active_agent_id = selected_agent
+
     st.sidebar.text_input(
         "Session goal",
         value=st.session_state.session_settings.goal,
@@ -256,7 +414,14 @@ def main() -> None:
             key=f"enable_{agent['id']}",
         )
         st.session_state.agent_enabled[agent["id"]] = enabled
-        st.sidebar.caption(agent.get("description", ""))
+        credentials_status = (
+            "Credentials configured" if agent.get("has_credentials") else "Credentials missing"
+        )
+        description = agent.get("description", "")
+        caption = description if not description else f"{description}\n{credentials_status}"
+        if not description:
+            caption = credentials_status
+        st.sidebar.caption(caption)
 
     if st.sidebar.button("Start new session"):
         reset_session(agents)
@@ -267,6 +432,37 @@ def main() -> None:
             st.warning("Maximum configured rounds reached. Increase the limit to continue.")
         else:
             run_round(agents, st.session_state.session_settings, st.session_state.completed_rounds)
+
+    st.sidebar.subheader("Conversation threads")
+    st.sidebar.text_input(
+        "Conversation title",
+        value=st.session_state.get("conversation_title", "Coalition Session"),
+        key="conversation_title",
+    )
+    if st.sidebar.button("Save transcript"):
+        try:
+            json_path, markdown_path = save_conversation(
+                st.session_state.transcript,
+                st.session_state.conversation_title,
+                st.session_state.completed_rounds,
+            )
+        except ValueError as error:
+            st.sidebar.warning(str(error))
+        else:
+            st.sidebar.success(
+                f"Saved to {json_path.name} (JSON) and {markdown_path.name} (Markdown)."
+            )
+
+    saved_conversations = sorted(CONVERSATIONS_DIR.glob("*.json"), reverse=True)
+    saved_labels = ["Select a saved conversation"] + [path.name for path in saved_conversations]
+    selected_saved = st.sidebar.selectbox("Load conversation", saved_labels, key="saved_selector")
+    if selected_saved and selected_saved != saved_labels[0]:
+        payload = load_saved_conversation(CONVERSATIONS_DIR / selected_saved)
+        st.session_state.transcript = payload.get("transcript", [])
+        st.session_state.agent_conversations = rebuild_agent_conversations(st.session_state.transcript)
+        st.session_state.conversation_title = payload.get("title", st.session_state.conversation_title)
+        st.session_state.completed_rounds = payload.get("completed_rounds", 0)
+        st.experimental_rerun()
 
     col_context, col_transcript, col_metrics = st.columns([1.2, 2.4, 1.0])
 
@@ -290,6 +486,21 @@ def main() -> None:
     with col_transcript:
         st.header("Transcript")
         with st.form("user_injection"):
+            agent_options = [agent["id"] for agent in agents]
+            if agent_options:
+                target_agent = st.selectbox(
+                    "Send to agent",
+                    options=agent_options,
+                    index=agent_options.index(st.session_state.active_agent_id)
+                    if st.session_state.active_agent_id in agent_options
+                    else 0,
+                    format_func=lambda agent_id: next(
+                        (agent.get("display_name", agent_id) for agent in agents if agent["id"] == agent_id),
+                        agent_id,
+                    ),
+                )
+            else:
+                target_agent = None
             manual_message = st.text_area(
                 "Inject manual facilitator message",
                 height=120,
@@ -297,9 +508,16 @@ def main() -> None:
             )
             submitted = st.form_submit_button("Add message")
             if submitted:
-                handle_manual_message(manual_message)
+                handle_manual_message(manual_message, target_agent_id=target_agent if agent_options else None)
                 st.experimental_rerun()
-        render_transcript(st.session_state.transcript)
+        transcript_tabs = st.tabs(["Unified view", "Active persona thread"])
+        with transcript_tabs[0]:
+            render_transcript(st.session_state.transcript)
+        with transcript_tabs[1]:
+            active_transcript = st.session_state.agent_conversations.get(
+                st.session_state.get("active_agent_id", ""), []
+            )
+            render_transcript(active_transcript)
 
     with col_metrics:
         st.header("Session Metrics")
@@ -318,7 +536,10 @@ def main() -> None:
                 provider = agent.get("provider", "n/a")
                 model = agent.get("model", "dry-run")
                 st.write(f"**{agent.get('display_name', agent['id'])}**")
-                st.caption(f"{provider} · {model}")
+                credentials_status = (
+                    "Credentials configured" if agent.get("has_credentials") else "Credentials missing"
+                )
+                st.caption(f"{provider} · {model}\n{credentials_status}")
 
         st.subheader("Transcript log")
         st.caption(str(TRANSCRIPT_LOG_PATH.resolve()))

@@ -10,8 +10,9 @@ The console is designed to let researchers coordinate "rounds" of dialogue among
 
 - **Agent management sidebar**
   - Enable/disable individual agents and configure their model/provider.
+  - Select an "active" persona to focus the conversation view and direct facilitator prompts.
   - Set per-agent privileges (compose, read_docs, web, code, etc.).
-  - Optional API key inputs (fall back to deterministic dry-run if not provided).
+  - Reference credentials stored in `st.secrets` or environment variables instead of hard-coding keys.
 - **Admin controls**
   - Define the number of dialogue rounds and the structure of each round (kickoff → task turns → self-eval → review).
   - Configure intro/outro turns for the administrator agent.
@@ -25,6 +26,7 @@ The console is designed to let researchers coordinate "rounds" of dialogue among
   - Planned citation display that references uploaded documents.
 - **Logging and persistence**
   - Persist every turn to `data/session_transcript.jsonl`.
+  - Save complete sessions as timestamped JSON + Markdown bundles under `data/conversations/` for later review.
   - Surface per-session metrics (tokens, estimated spend) in a right-hand panel.
 - **Adaptable orchestration layer**
   - `scripts/orchestrator_adapter.py` exposes `dry_run_compose(...)` for deterministic behavior and `call_provider(...)` for future integration with production orchestration (e.g., `AI_Team_Framework.Coordinator`).
@@ -53,6 +55,25 @@ AI-orchestrator-Streamlit/
 ```
 
 The Streamlit app can run entirely in deterministic dry-run mode, making it safe to explore without API keys.
+
+## Credentials
+
+For production use, never hard-code provider API keys in the repository. Instead, supply credentials via Streamlit secrets or environment variables and reference them from `config/agents.yaml`:
+
+```yaml
+agents:
+  - id: gpt_researcher
+    provider: openai
+    model: gpt-4o-mini
+    secret_key: OPENAI_API_KEY  # looks for st.secrets["OPENAI_API_KEY"]
+    env_key: OPENAI_API_KEY     # fallback to os.environ["OPENAI_API_KEY"]
+```
+
+Only the boolean `has_credentials` flag is surfaced in the UI so that sensitive values never appear in logs or the interface. If neither source is defined the app stays in deterministic dry-run mode.
+
+## Conversation archives
+
+Each session can be saved from the sidebar. The console writes a timestamped JSON payload (for re-loading later) and a human-readable Markdown transcript to `data/conversations/`. Saved threads can be reloaded into the app at any time, allowing facilitators to maintain separate workstreams per agent persona or project.
 
 ## Implementation Roadmap
 
