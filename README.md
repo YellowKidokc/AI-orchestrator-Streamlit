@@ -16,8 +16,8 @@ and optionally capture the OpenAI API key inside the Streamlit session (never wr
   under `vaults/`, highlighting relevant evidence for the conversation.
 - **Note browsing and editing** – Inspect and update vault Markdown files directly inside the UI
   to keep the knowledge base fresh.
-- **Conversation history** – Save transcripts to timestamped JSON files under `history/` and
-  reload them at any time to continue workstreams.
+- **Conversation history** – Save transcripts to timestamped JSON files under `history/`
+  (tagged with the active vault) and reload them at any time to continue workstreams.
 - **Cross-vault search** – Run quick searches across all vaults to surface contextual snippets
   even if you are focused on a single persona.
 
@@ -48,13 +48,16 @@ AI-orchestrator-Streamlit/
    pip install -r requirements.txt
    ```
 3. (Optional) Copy `.env.example` to `.env` and populate with API keys or other secrets. The
-   app loads environment variables automatically via `python-dotenv` when it starts.
-4. Launch Streamlit:
+   app loads environment variables automatically via `python-dotenv` when it starts. You can
+   also paste an API key into the sidebar; it remains in memory for the active session only.
+4. Adjust vault configuration if needed by editing `config/vaults.yaml`. Paths may be
+   absolute or relative to the project root and are created on demand.
+5. Launch Streamlit:
    ```bash
    streamlit run app/main.py
    ```
-5. Use the sidebar to pick an active persona, toggle between single- or multi-agent replies,
-   run cross-vault searches, and manage saved conversations.
+6. Use the sidebar to pick an active persona, choose which vault to browse, toggle between
+   single- or multi-agent replies, run cross-vault searches, and manage saved conversations.
 
 ## Conversation persistence
 

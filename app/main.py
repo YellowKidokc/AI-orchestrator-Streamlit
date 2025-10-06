@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, List
 import sys
 
+import yaml
+
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,20 +26,77 @@ from agents.responder import build_response
 HISTORY_DIR = Path("history")
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-VAULT_ROOT = Path("vaults")
-VAULT_CONFIG = {
-    "physics": VAULT_ROOT / "physics",
-    "theology": VAULT_ROOT / "theology",
-    "integration": VAULT_ROOT / "integration",
-}
+
+def load_vault_registry() -> Dict[str, Dict[str, object]]:
+    """Load vault metadata from config/vaults.yaml with sensible defaults."""
+
+    config_path = ROOT / "config" / "vaults.yaml"
+    registry: Dict[str, Dict[str, object]] = {}
+    defaults = {
+        "physics": {
+            "name": "Physics Vault",
+            "path": ROOT / "vaults" / "physics",
+            "description": "Notes collected from fusion research sprints.",
+        },
+        "theology": {
+            "name": "Theology Vault",
+            "path": ROOT / "vaults" / "theology",
+            "description": "Ethical frameworks and spiritual guidance for coalition work.",
+        },
+        "integration": {
+            "name": "Integration Vault",
+            "path": ROOT / "vaults" / "integration",
+            "description": "Strategy blueprints blending technical and moral priorities.",
+        },
+    }
+
+    data: Dict[str, Dict[str, object]] = {}
+    if config_path.exists():
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = loaded.get("vaults", {}) or {}
+
+    for key, default_entry in defaults.items():
+        path_obj = Path(default_entry["path"])
+        path_obj.mkdir(parents=True, exist_ok=True)
+        registry[key] = {
+            "name": default_entry["name"],
+            "path": path_obj,
+            "description": default_entry.get("description", ""),
+        }
+
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        path_value = entry.get("path")
+        if not path_value:
+            continue
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            path = (ROOT / path).resolve()
+        registry[key] = {
+            "name": entry.get("name") or registry.get(key, {}).get("name") or key.title(),
+            "path": path,
+            "description": entry.get("description", ""),
+        }
+        path.mkdir(parents=True, exist_ok=True)
+
+    return registry
+
+
+VAULT_REGISTRY = load_vault_registry()
 
 
 @st.cache_data(show_spinner=False)
 def load_vault_documents(vault_key: str) -> Dict[str, str]:
     """Return the Markdown documents for the requested vault."""
 
-    vault_path = VAULT_CONFIG.get(vault_key)
-    if not vault_path or not vault_path.exists():
+    entry = VAULT_REGISTRY.get(vault_key)
+    if not entry:
+        return {}
+
+    vault_path = Path(entry["path"])
+    if not vault_path.exists():
         return {}
 
     documents: Dict[str, str] = {}
@@ -55,6 +114,8 @@ def ensure_state(personas: List[AgentPersona]) -> None:
         st.session_state.agent_histories = {persona.identifier: [] for persona in personas}
     if "active_agent" not in st.session_state and personas:
         st.session_state.active_agent = personas[0].identifier
+    if "_last_persona" not in st.session_state:
+        st.session_state._last_persona = st.session_state.get("active_agent", "")
     if "conversation_title" not in st.session_state:
         st.session_state.conversation_title = "Coalition Session"
     if "response_mode" not in st.session_state:
@@ -63,6 +124,10 @@ def ensure_state(personas: List[AgentPersona]) -> None:
         st.session_state.cross_vault_results = []
     if "openai_api_key" not in st.session_state:
         st.session_state.openai_api_key = ""
+    if "active_vault" not in st.session_state and personas:
+        st.session_state.active_vault = personas[0].vault_key
+    if "vault_manual_override" not in st.session_state:
+        st.session_state.vault_manual_override = False
 
 
 def append_message(
@@ -93,13 +158,15 @@ def save_conversation() -> Path:
 
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     st.session_state._last_saved_timestamp = timestamp
-    filename = f"{timestamp}_{slug}.json"
+    vault_slug = (st.session_state.active_vault or "vault").replace(" ", "-")
+    filename = f"{timestamp}_{vault_slug}_{slug}.json"
     destination = HISTORY_DIR / filename
     payload = {
         "title": st.session_state.conversation_title,
         "messages": st.session_state.messages,
         "active_agent": st.session_state.active_agent,
         "response_mode": st.session_state.response_mode,
+        "active_vault": st.session_state.active_vault,
     }
     destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return destination
@@ -117,6 +184,9 @@ def load_conversation(path: Path, personas: List[AgentPersona]) -> None:
     mode = payload.get("response_mode")
     if mode:
         st.session_state.response_mode = mode
+    vault = payload.get("active_vault")
+    if vault:
+        st.session_state.active_vault = vault
 
     st.session_state.agent_histories = {persona.identifier: [] for persona in personas}
     for record in st.session_state.messages:
@@ -130,7 +200,7 @@ def load_conversation(path: Path, personas: List[AgentPersona]) -> None:
                 history.append(record)
 
 
-def render_sidebar(personas: List[AgentPersona]) -> None:
+def render_sidebar(personas: List[AgentPersona]) -> AgentPersona | None:
     """Sidebar layout for agent controls and persistence."""
 
     st.sidebar.title("Coalition Controls")
@@ -143,25 +213,52 @@ def render_sidebar(personas: List[AgentPersona]) -> None:
     else:
         st.sidebar.caption("Running in dry-run mode without an API key.")
 
-    options = [persona.identifier for persona in personas]
+    persona_lookup = {persona.identifier: persona for persona in personas}
+    selected_persona: AgentPersona | None = None
+
+    options = list(persona_lookup.keys())
     if options:
         if st.session_state.active_agent not in options:
             st.session_state.active_agent = options[0]
         index = options.index(st.session_state.active_agent)
-        selected = st.sidebar.selectbox(
+        selected_identifier = st.sidebar.selectbox(
             "Active persona",
             options=options,
             index=index,
-            format_func=lambda identifier: next(
-                (
-                    persona.to_sidebar_label()
-                    for persona in personas
-                    if persona.identifier == identifier
-                ),
-                identifier,
-            ),
+            format_func=lambda identifier: persona_lookup[identifier].to_sidebar_label(),
         )
-        st.session_state.active_agent = selected
+        st.session_state.active_agent = selected_identifier
+        selected_persona = persona_lookup[selected_identifier]
+
+        persona_changed = st.session_state._last_persona != selected_identifier
+        if persona_changed and not st.session_state.vault_manual_override:
+            st.session_state.active_vault = selected_persona.vault_key
+        st.session_state._last_persona = selected_identifier
+
+    vault_options = list(VAULT_REGISTRY.keys())
+    if vault_options:
+        if st.session_state.active_vault not in vault_options:
+            st.session_state.active_vault = vault_options[0]
+        vault_index = vault_options.index(st.session_state.active_vault)
+        selected_vault = st.sidebar.selectbox(
+            "Active vault",
+            options=vault_options,
+            index=vault_index,
+            format_func=lambda key: str(VAULT_REGISTRY[key]["name"]),
+        )
+        if selected_vault != st.session_state.active_vault:
+            st.session_state.active_vault = selected_vault
+            st.session_state.vault_manual_override = True
+        if selected_persona and st.sidebar.button(
+            "Sync vault to persona", key="sync_vault_button"
+        ):
+            st.session_state.active_vault = selected_persona.vault_key
+            st.session_state.vault_manual_override = False
+
+        current_vault = VAULT_REGISTRY.get(st.session_state.active_vault, {})
+        vault_description = current_vault.get("description")
+        if vault_description:
+            st.sidebar.caption(vault_description)
 
     mode = st.sidebar.radio("Response mode", ["Active agent", "Consult all"], index=0)
     st.session_state.response_mode = mode
@@ -203,6 +300,8 @@ def render_sidebar(personas: List[AgentPersona]) -> None:
     if clear_clicked:
         st.session_state.cross_vault_results = []
 
+    return selected_persona
+
 
 def build_cross_vault_results(query: str, documents: Dict[str, str]) -> List[tuple[str, str]]:
     """Helper that reuses the responder search routine for cross-vault UI."""
@@ -224,11 +323,19 @@ def render_cross_vault_results() -> None:
         st.caption(snippet.strip())
 
 
-def render_vault_editor(persona: AgentPersona) -> None:
-    """Show editable notes for the active persona's vault."""
+def render_vault_editor(vault_key: str) -> None:
+    """Show editable notes for the selected vault."""
 
-    documents = load_vault_documents(persona.vault_key)
-    st.subheader("Vault notes")
+    entry = VAULT_REGISTRY.get(vault_key)
+    if not entry:
+        st.info("Select a vault to browse and edit notes.")
+        return
+
+    documents = load_vault_documents(vault_key)
+    st.subheader(f"{entry['name']} notes")
+    description = entry.get("description")
+    if description:
+        st.caption(description)
     if not documents:
         st.info("No Markdown documents found for this vault yet.")
         return
@@ -236,15 +343,15 @@ def render_vault_editor(persona: AgentPersona) -> None:
     names = sorted(documents.keys())
     default_index = 0
     selected_name = st.selectbox("Select note", names, index=default_index)
-    content_key = f"note_{persona.vault_key}_{selected_name}"
+    content_key = f"note_{vault_key}_{selected_name}"
     st.session_state.setdefault(content_key, documents[selected_name])
     updated_content = st.text_area(
         "Edit note", value=st.session_state[content_key], height=240, key=content_key
     )
-    if st.button("Save note", key=f"save_{persona.vault_key}_{selected_name}"):
-        note_path = VAULT_CONFIG[persona.vault_key] / selected_name
+    if st.button("Save note", key=f"save_{vault_key}_{selected_name}"):
+        note_path = Path(entry["path"]) / selected_name
         note_path.write_text(updated_content, encoding="utf-8")
-        st.success(f"Saved {selected_name} to {persona.vault_key} vault.")
+        st.success(f"Saved {selected_name} to {vault_key} vault.")
         load_vault_documents.clear()
 
 
@@ -296,7 +403,7 @@ def main() -> None:
     ensure_state(personas)
 
     st.set_page_config(page_title="Coalition Multi-Agent Console", layout="wide")
-    render_sidebar(personas)
+    active_persona = render_sidebar(personas)
 
     st.title("Coalition Multi-Agent Workspace")
     st.caption(
@@ -311,10 +418,10 @@ def main() -> None:
             handle_user_message(personas, user_message)
             st.experimental_rerun()
     with columns[1]:
-        active = next(
-            persona for persona in personas if persona.identifier == st.session_state.active_agent
-        )
-        render_vault_editor(active)
+        vault_key = st.session_state.get("active_vault")
+        if not vault_key and active_persona:
+            vault_key = active_persona.vault_key
+        render_vault_editor(vault_key or "")
         render_cross_vault_results()
 
 
