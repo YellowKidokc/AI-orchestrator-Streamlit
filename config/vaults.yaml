@@ -1,0 +1,13 @@
+vaults:
+  physics:
+    name: Physics Vault
+    path: vaults/physics
+    description: Notes collected from fusion research sprints.
+  theology:
+    name: Theology Vault
+    path: vaults/theology
+    description: Ethical frameworks and spiritual guidance for coalition work.
+  integration:
+    name: Integration Vault
+    path: vaults/integration
+    description: Strategy blueprints blending technical and moral priorities.

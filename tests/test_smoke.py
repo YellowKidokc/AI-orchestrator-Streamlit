@@ -1,4 +1,4 @@
-"""Basic smoke tests for the Logos Multi-Agent Console scaffolding."""
+"""Smoke tests for the coalition multi-agent workspace."""
 from importlib import import_module
 from pathlib import Path
 import sys
@@ -11,29 +11,50 @@ if str(ROOT) not in sys.path:
 
 _streamlit = pytest.importorskip("streamlit")
 
-from scripts.orchestrator_adapter import AgentTurn, dry_run_compose
 
-
-def test_streamlit_app_imports() -> None:
-    """The Streamlit app should be importable for smoke testing."""
+def test_streamlit_wrapper_exposes_main() -> None:
+    """The compatibility wrapper should re-export the main entrypoint."""
 
     module = import_module("streamlit_app")
     assert hasattr(module, "main")
 
 
-def test_dry_run_compose_produces_turn() -> None:
-    """Dry-run compose should generate a deterministic AgentTurn."""
+def test_persona_registry_round_trip() -> None:
+    """Personas should be discoverable and have vaults configured."""
 
-    agent = {
-        "id": "tester",
-        "display_name": "Test Agent",
-        "role": "participant",
-        "cost_per_1k_tokens": 1.0,
+    persona_module = import_module("agents.persona")
+    app_module = import_module("app.main")
+    personas = persona_module.list_personas()
+    assert len(personas) == 3
+    for persona in personas:
+        vault_entry = app_module.VAULT_REGISTRY.get(persona.vault_key)
+        assert vault_entry is not None
+        vault_path = Path(vault_entry["path"])
+        assert vault_path.exists()
+        assert vault_path.is_dir()
+
+
+def test_responder_returns_text() -> None:
+    """Responder should generate deterministic content for a persona."""
+
+    persona_module = import_module("agents.persona")
+    responder_module = import_module("agents.responder")
+    persona = persona_module.list_personas()[0]
+    documents = {
+        "example.md": "Fusion energy remains a grand challenge with tokamak experiments."
     }
-    settings = {"goal": "Validate smoke test", "may_skip": False, "phase": "task"}
-    turn = dry_run_compose(agent, settings, round_index=0, turn_index=0, phase="task")
+    output = responder_module.build_response(persona, "fusion", documents, [])
+    assert "Persona" in output
+    assert "fusion" in output.lower()
 
-    assert isinstance(turn, AgentTurn)
-    assert turn.agent_id == "tester"
-    assert "round 1" in turn.content
-    assert turn.tokens > 0
+
+def test_vault_registry_reads_yaml() -> None:
+    """Vault registry should prefer YAML overrides when present."""
+
+    app_module = import_module("app.main")
+    registry = app_module.load_vault_registry()
+    assert set(registry.keys()) >= {"physics", "theology", "integration"}
+    for entry in registry.values():
+        path = Path(entry["path"])
+        assert path.exists()
+        assert path.is_dir()

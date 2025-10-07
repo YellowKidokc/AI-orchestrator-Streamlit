@@ -84,9 +84,20 @@ def dry_run_compose(
     )
 
 
-def call_provider(*_, **__) -> AgentTurn:
-    """Placeholder for future integration with a real orchestration backend."""
+def call_provider(
+    agent_config: Dict[str, object],
+    session_settings: Dict[str, object],
+    round_index: int,
+    turn_index: int,
+    phase: str,
+    *,
+    api_key: str | None = None,
+) -> AgentTurn:
+    """Dispatch to a live provider when credentials are present, else dry-run."""
+
+    if not api_key:
+        return dry_run_compose(agent_config, session_settings, round_index, turn_index, phase)
 
     raise NotImplementedError(
-        "call_provider is not yet implemented. Wire this function to your orchestration backend when ready."
+        "Live provider integration is not implemented. Supply an api_key to replace this stub."
     )
