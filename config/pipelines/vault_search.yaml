@@ -1,0 +1,35 @@
+# Vault Search Pipeline
+# Search across knowledge vaults and export results
+
+name: vault_search_pipeline
+description: Search vault notes and export matching results
+
+variables:
+  query: "fusion"
+  output_file: "data/search_results.json"
+
+steps:
+  # Step 1: List available vaults
+  - type: vault_list
+    output_key: available_vaults
+    include_notes: true
+
+  # Step 2: Search across all vaults
+  - type: vault_search
+    query: "${query}"
+    max_results: 20
+    snippet_length: 300
+    output_key: search_results
+
+  # Step 3: Save search results
+  - type: save_file
+    input_key: search_results
+    path: "${output_file}"
+    format: json
+
+metadata:
+  author: system
+  version: "1.0"
+  tags:
+    - vault
+    - search

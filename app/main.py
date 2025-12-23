@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 from agents.persona import AgentPersona, list_personas
 from agents.responder import build_response
+from app.pipeline_ui import render_pipeline_tab, render_pipeline_sidebar_widget, ensure_pipeline_state
 
 HISTORY_DIR = Path("history")
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -401,28 +402,36 @@ def main() -> None:
     load_dotenv()
     personas = list_personas()
     ensure_state(personas)
+    ensure_pipeline_state()
 
     st.set_page_config(page_title="Coalition Multi-Agent Console", layout="wide")
     active_persona = render_sidebar(personas)
 
     st.title("Coalition Multi-Agent Workspace")
     st.caption(
-        "Coordinate specialised AI personas tied to discrete Obsidian vaults."
+        "Coordinate specialised AI personas tied to discrete Obsidian vaults and run config-driven pipelines."
     )
 
-    columns = st.columns([2, 1])
-    with columns[0]:
-        render_messages(personas)
-        user_message = st.chat_input("Ask the coalition or share an update")
-        if user_message:
-            handle_user_message(personas, user_message)
-            st.experimental_rerun()
-    with columns[1]:
-        vault_key = st.session_state.get("active_vault")
-        if not vault_key and active_persona:
-            vault_key = active_persona.vault_key
-        render_vault_editor(vault_key or "")
-        render_cross_vault_results()
+    # Main workspace tabs
+    tab_chat, tab_pipelines = st.tabs(["Agent Chat", "Pipelines"])
+
+    with tab_chat:
+        columns = st.columns([2, 1])
+        with columns[0]:
+            render_messages(personas)
+            user_message = st.chat_input("Ask the coalition or share an update")
+            if user_message:
+                handle_user_message(personas, user_message)
+                st.rerun()
+        with columns[1]:
+            vault_key = st.session_state.get("active_vault")
+            if not vault_key and active_persona:
+                vault_key = active_persona.vault_key
+            render_vault_editor(vault_key or "")
+            render_cross_vault_results()
+
+    with tab_pipelines:
+        render_pipeline_tab()
 
 
 __all__ = ["main"]
