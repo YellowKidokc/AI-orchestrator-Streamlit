@@ -1,0 +1,46 @@
+# Example API Pipeline
+# Demonstrates fetching data from a public API and saving it
+
+name: example_api_pipeline
+description: Fetch data from a public API, transform it, and save to file
+
+# Default variables - can be overridden at runtime
+variables:
+  limit: 10
+  output_dir: data/api_output
+
+steps:
+  # Step 1: Fetch data from JSONPlaceholder API
+  - type: api_fetch
+    url: "https://jsonplaceholder.typicode.com/posts"
+    params:
+      _limit: "${limit}"
+    output_key: raw_posts
+
+  # Step 2: Transform - extract only needed fields
+  - type: transform
+    input_key: raw_posts
+    output_key: posts
+    extract:
+      - id
+      - title
+      - body
+
+  # Step 3: Save as JSON
+  - type: save_file
+    input_key: posts
+    path: "${output_dir}/posts.json"
+    format: json
+
+  # Step 4: Save as CSV
+  - type: save_file
+    input_key: posts
+    path: "${output_dir}/posts.csv"
+    format: csv
+
+metadata:
+  author: system
+  version: "1.0"
+  tags:
+    - example
+    - api

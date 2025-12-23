@@ -1,0 +1,74 @@
+# Data Transformation Pipeline
+# Load, transform, filter, and aggregate data
+
+name: data_transform_pipeline
+description: Comprehensive data transformation workflow
+
+variables:
+  input_file: "data/input.json"
+  output_dir: "data/transformed"
+  min_value: 0
+
+steps:
+  # Step 1: Load input data
+  - type: load_file
+    path: "${input_file}"
+    output_key: raw_data
+
+  # Step 2: Filter by condition
+  - type: filter
+    input_key: raw_data
+    output_key: filtered_data
+    conditions:
+      - field: value
+        op: gte
+        value: "${min_value}"
+    match: all
+
+  # Step 3: Transform fields
+  - type: transform
+    input_key: filtered_data
+    output_key: transformed_data
+    flatten: true
+
+  # Step 4: Map to new structure
+  - type: map
+    input_key: transformed_data
+    output_key: mapped_data
+    add_fields:
+      processed_at: "${data.timestamp}"
+      source: "pipeline"
+
+  # Step 5: Aggregate statistics
+  - type: aggregate
+    input_key: mapped_data
+    output_key: stats
+    operations:
+      - field: value
+        func: count
+        alias: total_count
+      - field: value
+        func: sum
+        alias: total_value
+      - field: value
+        func: avg
+        alias: avg_value
+
+  # Step 6: Save transformed data
+  - type: save_file
+    input_key: mapped_data
+    path: "${output_dir}/transformed.json"
+    format: json
+
+  # Step 7: Save statistics
+  - type: save_file
+    input_key: stats
+    path: "${output_dir}/stats.json"
+    format: json
+
+metadata:
+  author: system
+  version: "1.0"
+  tags:
+    - transform
+    - aggregate
